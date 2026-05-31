@@ -29,8 +29,8 @@ Browser (static SPA)  ──POST /api/message──▶  Vercel function  ──x
    `api/` function. `vercel.json` already pins this.
 3. **Project → Settings → Environment Variables**, add:
    - `GEMINI_API_KEY` = your key from [Google AI Studio](https://aistudio.google.com/apikey) (**required**)
-   - `GEMINI_MODEL` = `gemini-3.5-flash` *(optional; default)*
-   - `GEMINI_FALLBACK` = `gemini-3-flash,gemini-2.5-flash` *(optional)*
+   - `GEMINI_MODEL` = `gemini-2.5-flash` *(optional; default)*
+   - `GEMINI_FALLBACK` = `gemini-2.0-flash,gemini-1.5-flash` *(optional)*
    - `MAX_TOKENS` = `1200` *(optional)*
    - `TEMPERATURE` = `1.0` *(optional; higher = more distinct director voices, try 0.9–1.2)*
 4. **Deploy.** You get an HTTPS URL like `https://your-app.vercel.app` — open it

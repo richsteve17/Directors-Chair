@@ -1,0 +1,336 @@
+import React, { useReducer, useEffect, useRef, useState, useCallback } from "react";
+import { ALBUMS } from "./data/albums.js";
+import { reducer, initialState, defaultSelected } from "./hooks/gauntletReducer.js";
+import { callAPI } from "./lib/api.js";
+import { safeParse } from "./lib/json.js";
+import { interviewSystem, weaveSystem, finalizeSystem, buildContinuity } from "./lib/prompts.js";
+import { transcriptToMessages, countAnswers, buildExportText } from "./lib/transcript.js";
+import { loadState, saveState, deleteState, storageBackend } from "./lib/storage.js";
+import { useSpeech } from "./hooks/useSpeech.js";
+import { downloadText, stamp } from "./lib/util.js";
+import { STORE_KEY, wrapStyle, SANS, STEEL } from "./styles/tokens.js";
+
+import SetupScreen from "./components/SetupScreen.jsx";
+import InterviewScreen from "./components/InterviewScreen.jsx";
+import WeaveScreen from "./components/WeaveScreen.jsx";
+import DoneScreen from "./components/DoneScreen.jsx";
+import CrisisFooter from "./components/CrisisFooter.jsx";
+
+// Serialisable slice of state we persist.
+function persistable(s) {
+  const { phase, selected, run, ci, stageClosed, weaveIdx, docMeta, ttsOn } = s;
+  return { version: 2, phase, selected, run, ci, stageClosed, weaveIdx, docMeta, ttsOn };
+}
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  const [hydrated, setHydrated] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  const { speechOK, speak, stop: stopAudio } = useSpeech(state.ttsOn);
+
+  // Abort controller for in-flight requests (Fix #6).
+  const abortRef = useRef(null);
+  const newAbort = () => {
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+    return abortRef.current.signal;
+  };
+  const cancelInFlight = () => {
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = null;
+  };
+
+  // --- Hydrate on mount ---
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const saved = await loadState(STORE_KEY);
+      if (!cancelled && saved) dispatch({ type: "HYDRATE", payload: saved });
+      if (!cancelled) setHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // --- Persist on change ---
+  useEffect(() => {
+    if (!hydrated) return;
+    saveState(STORE_KEY, persistable(state));
+  }, [hydrated, state.phase, state.selected, state.run, state.ci, state.stageClosed, state.weaveIdx, state.docMeta, state.ttsOn]);
+
+  // Cancel any request on unmount.
+  useEffect(() => () => cancelInFlight(), []);
+
+  // ---- Continuity for chapter idx (bounded digests, Fix #4) ----
+  const continuityFor = useCallback((idx, run) => buildContinuity(run.slice(0, idx)), []);
+
+  // ---- Open a chapter (first director turn) ----
+  const openChapter = useCallback(
+    async (idx, run) => {
+      dispatch({ type: "OPEN_CHAPTER_START" });
+      stopAudio();
+      const signal = newAbort();
+      try {
+        const sys = interviewSystem(run[idx].album, continuityFor(idx, run));
+        const msgs = transcriptToMessages([]); // empty transcript -> just the [begin] primer
+        const out = await callAPI(sys, msgs, { signal });
+        const parsed = safeParse(out, { speech: out, done: false });
+        dispatch({ type: "OPEN_CHAPTER_OK", ci: idx, speech: parsed.speech });
+        speak(parsed.speech, run[idx].director);
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        const banner = err && err.rateLimited
+          ? "Rate limit hit — the API needs a short cooldown. Wait a minute, then tap “Try this question again.” Your progress is safe."
+          : "Couldn't reach the director (" + String(err?.message || err).slice(0, 120) + "). Tap “Try this question again.”";
+        dispatch({ type: "OPEN_CHAPTER_FAIL", banner });
+      }
+    },
+    [continuityFor, speak, stopAudio]
+  );
+
+  const onBegin = useCallback(async () => {
+    dispatch({ type: "BEGIN" });
+  }, []);
+
+  // After BEGIN sets the run, kick off chapter 0.
+  const begunRef = useRef(false);
+  useEffect(() => {
+    if (state.phase === "interview" && state.run.length && state.run[0].transcript.length === 0 && !state.loading && !begunRef.current && !state.banner) {
+      begunRef.current = true;
+      openChapter(0, state.run);
+    }
+    if (state.phase !== "interview") begunRef.current = false;
+  }, [state.phase, state.run, state.loading, state.banner, openChapter]);
+
+  // ---- Answer ----
+  const onAnswer = useCallback(async () => {
+    const text = state.input.trim();
+    if (!text || state.loading) return;
+    stopAudio();
+
+    // Optimistic append.
+    dispatch({ type: "APPEND_ANSWER", text });
+
+    // Build the messages from the (about-to-be) transcript.
+    const ci = state.ci;
+    const baseTranscript = [...state.run[ci].transcript, { who: "you", text }];
+    const answersSoFar = countAnswers(baseTranscript);
+    const msgs = transcriptToMessages(baseTranscript, { closingHint: answersSoFar >= 8 });
+    const sys = interviewSystem(state.run[ci].album, continuityFor(ci, state.run));
+
+    const signal = newAbort();
+    try {
+      const out = await callAPI(sys, msgs, { signal });
+      const parsed = safeParse(out, { speech: out, done: false });
+      dispatch({ type: "APPEND_DIRECTOR", speech: parsed.speech, done: !!parsed.done });
+      speak(parsed.speech, state.run[ci].director);
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      const banner = err && err.rateLimited
+        ? "Rate limit hit — wait a minute and tap Answer again. Your words are back in the box and your progress is safe."
+        : "That didn't go through (" + String(err?.message || err).slice(0, 120) + "). Your answer is back in the box — tap Answer to retry.";
+      dispatch({ type: "ROLLBACK_ANSWER", text, banner });
+    }
+  }, [state.input, state.loading, state.ci, state.run, continuityFor, speak, stopAudio]);
+
+  // ---- Navigation ----
+  const onBackToStart = useCallback(() => {
+    cancelInFlight();
+    stopAudio();
+    dispatch({ type: "TO_SETUP" });
+  }, [stopAudio]);
+
+  const onEndStage = useCallback(() => {
+    cancelInFlight();
+    stopAudio();
+    dispatch({ type: "CLOSE_STAGE" });
+  }, [stopAudio]);
+
+  const onRetryOpen = useCallback(() => {
+    dispatch({ type: "SET_BANNER", banner: "" });
+    openChapter(state.ci, state.run);
+  }, [openChapter, state.ci, state.run]);
+
+  // ---- Weaving ----
+  const weaveNext = useCallback(
+    async (idx, run) => {
+      if (idx >= run.length) {
+        await finalizeDoc(run);
+        return;
+      }
+      dispatch({ type: "WEAVE_PROGRESS", idx });
+      const prev = idx > 0 ? run[idx - 1] : null;
+      const prevTail = prev && prev.woven ? prev.woven.prose.slice(-160) : "";
+      const transcriptText = run[idx].transcript
+        .map((t) => `${t.who === "you" ? "STEVE" : run[idx].director.toUpperCase()}: ${t.text}`)
+        .join("\n\n");
+
+      let woven;
+      const signal = newAbort();
+      try {
+        const out = await callAPI(
+          weaveSystem(run[idx].album, prev ? prev.director : null, prevTail),
+          [{ role: "user", content: `Interview transcript:\n\n${transcriptText}\n\nWrite the chapter.` }],
+          { signal }
+        );
+        woven = safeParse(out, null);
+        if (!woven || !woven.prose) throw new Error("no prose");
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        woven = {
+          chapterTitle: run[idx].album,
+          prose: `This chapter — ${run[idx].album}, in the voice of ${run[idx].director} — could not be rendered this pass. Steve's interview for it is preserved in the transcript; reweave it any time.`,
+        };
+      }
+      dispatch({ type: "WEAVE_OK", idx, woven });
+      const updated = run.map((c, i) => (i === idx ? { ...c, woven } : c));
+      setTimeout(() => weaveNext(idx + 1, updated), 300);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const finalizeDoc = useCallback(async (run) => {
+    dispatch({ type: "FINALIZE_START" });
+    const signal = newAbort();
+    try {
+      const titles = run
+        .map((c) => `${c.album} (dir. ${c.director}): ${c.woven ? c.woven.chapterTitle : ""}`)
+        .join("\n");
+      const out = await callAPI(finalizeSystem(), [{ role: "user", content: titles }], { signal });
+      const parsed = safeParse(out, { title: "CMASS", logline: "A life told in many voices." });
+      dispatch({ type: "FINALIZE_OK", docMeta: parsed });
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      dispatch({ type: "FINALIZE_OK", docMeta: { title: "CMASS", logline: "A life told in many voices." } });
+    }
+  }, []);
+
+  const onNextStage = useCallback(async () => {
+    if (state.ci + 1 < state.run.length) {
+      const n = state.ci + 1;
+      dispatch({ type: "GOTO_CHAPTER", ci: n });
+      await openChapter(n, state.run);
+    } else {
+      cancelInFlight();
+      stopAudio();
+      dispatch({ type: "TO_WEAVING" });
+      weaveNext(0, state.run);
+    }
+  }, [state.ci, state.run, openChapter, weaveNext, stopAudio]);
+
+  // ---- Reset ----
+  const onReset = useCallback(async () => {
+    cancelInFlight();
+    stopAudio();
+    await deleteState(STORE_KEY);
+    dispatch({ type: "RESET" });
+    setConfirmReset(false);
+  }, [stopAudio]);
+
+  // ---- Save / Load files ----
+  const onExportTxt = useCallback(() => {
+    try {
+      downloadText(`cmass-gauntlet-${stamp()}.txt`, buildExportText(state.run, state.docMeta));
+      dispatch({ type: "SET_BANNER", banner: "Saved a .txt of everything so far to your device." });
+    } catch {
+      dispatch({ type: "SET_BANNER", banner: "Couldn't auto-download. Select the text above to copy it manually." });
+    }
+  }, [state.run, state.docMeta]);
+
+  const onExportSave = useCallback(() => {
+    try {
+      downloadText(`cmass-gauntlet-SAVE-${stamp()}.json`, JSON.stringify(persistable(state)), "application/json");
+      dispatch({ type: "SET_BANNER", banner: "Save file downloaded. Load it back any time to resume exactly here." });
+    } catch {
+      dispatch({ type: "SET_BANNER", banner: "Couldn't write the save file." });
+    }
+  }, [state]);
+
+  const onLoadSave = useCallback(
+    (file) => {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const s = safeParse(e.target.result, null);
+          if (!s || !Array.isArray(s.run)) throw new Error("not a gauntlet save");
+          cancelInFlight();
+          stopAudio();
+          const phase = s.phase && s.phase !== "setup" ? s.phase : s.run.length ? "interview" : "setup";
+          dispatch({
+            type: "LOAD_SAVE",
+            state: {
+              run: s.run,
+              selected: s.selected || defaultSelected(),
+              ci: typeof s.ci === "number" ? s.ci : 0,
+              stageClosed: !!s.stageClosed,
+              weaveIdx: typeof s.weaveIdx === "number" ? s.weaveIdx : 0,
+              docMeta: s.docMeta || null,
+              ttsOn: typeof s.ttsOn === "boolean" ? s.ttsOn : true,
+              phase,
+            },
+          });
+        } catch {
+          dispatch({ type: "SET_BANNER", banner: "That file isn't a valid gauntlet save." });
+        }
+      };
+      reader.onerror = () => dispatch({ type: "SET_BANNER", banner: "Couldn't read that file." });
+      reader.readAsText(file);
+    },
+    [stopAudio]
+  );
+
+  const onSave = onExportSave;
+  const hasAnyTranscript = state.run.some((c) => c.transcript && c.transcript.length);
+  const showCrisisFooter = state.phase !== "setup" || ALBUMS.some((a) => state.selected[a]);
+
+  if (!hydrated) {
+    return (
+      <div style={{ ...wrapStyle, display: "flex", justifyContent: "center", alignItems: "center" }}>
+        <div style={{ fontFamily: SANS, color: STEEL, letterSpacing: 2, fontSize: 12 }}>LOADING ARCHIVE…</div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {state.phase === "setup" && (
+        <SetupScreen
+          state={state}
+          dispatch={dispatch}
+          speechOK={speechOK}
+          storageBackend={storageBackend}
+          onBegin={onBegin}
+          onLoadSave={onLoadSave}
+          onReset={onReset}
+          confirmReset={confirmReset}
+          setConfirmReset={setConfirmReset}
+        />
+      )}
+      {state.phase === "interview" && (
+        <InterviewScreen
+          state={state}
+          dispatch={dispatch}
+          speechOK={speechOK}
+          onAnswer={onAnswer}
+          onSpeak={speak}
+          onStopAudio={stopAudio}
+          onSave={onSave}
+          onBackToStart={onBackToStart}
+          onEndStage={onEndStage}
+          onNextStage={onNextStage}
+          onRetryOpen={onRetryOpen}
+          hasAnyTranscript={hasAnyTranscript}
+        />
+      )}
+      {state.phase === "weaving" && <WeaveScreen state={state} />}
+      {state.phase === "done" && (
+        <DoneScreen state={state} onExportTxt={onExportTxt} onExportSave={onExportSave} onReset={onReset} />
+      )}
+      {showCrisisFooter && <CrisisFooter />}
+    </>
+  );
+}

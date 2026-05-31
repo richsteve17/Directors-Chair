@@ -13,8 +13,8 @@
 //   TEMPERATURE      (optional, default 1.0 — higher = more distinct/varied voices)
 // ============================================================================
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
-const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-3-flash,gemini-2.5-flash")
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-2.0-flash,gemini-1.5-flash")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -95,8 +95,8 @@ export default async function handler(req, res) {
         return res.status(429).json({ error: "rate_limited", detail: detail.slice(0, 300) });
       }
 
-      if (upstream.status === 404 && i < models.length - 1) {
-        // Unknown/retired model id — try the next fallback.
+      if ((upstream.status === 404 || upstream.status === 400) && i < models.length - 1) {
+        // Unknown/retired model id (Gemini may return 404 or 400) — try the next fallback.
         lastDetail = await upstream.text();
         continue;
       }

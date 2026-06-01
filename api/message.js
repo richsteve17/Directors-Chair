@@ -9,7 +9,7 @@
 //   GEMINI_API_KEY   (required)
 //   GEMINI_MODEL     (optional, default gemini-2.5-flash)
 //   GEMINI_FALLBACK  (optional, comma list of fallback model ids)
-//   MAX_TOKENS       (optional, default 2048)
+//   MAX_TOKENS       (optional, default 4096)
 //   TEMPERATURE      (optional, default 1.0 — higher = more distinct/varied voices)
 // ============================================================================
 
@@ -18,8 +18,8 @@ const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-2.0-flash,gemini-1.5-f
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-// 2048 comfortably fits a full ~380-word chapter weave (the longest call) as JSON.
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "2048", 10);
+// 4096 fits a full ~700-1000 word chapter weave (the longest call) as JSON with headroom.
+const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "4096", 10);
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || "1.0");
 
 // Map our { role:"user"|"assistant", content } -> Gemini contents (role "model").

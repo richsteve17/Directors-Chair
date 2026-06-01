@@ -176,7 +176,15 @@ export default function App() {
           { signal }
         );
         woven = safeParse(out, null);
-        if (!woven || !woven.prose) throw new Error("no prose");
+        // Tolerate non-JSON: if the model returned real prose but not valid JSON,
+        // keep the raw text instead of discarding the whole chapter. Only the
+        // genuinely-empty case (the old Gemini thinking-budget failure) falls through
+        // to the placeholder below.
+        if (!woven || !woven.prose) {
+          const raw = (typeof out === "string" ? out : "").trim();
+          if (raw) woven = { chapterTitle: run[idx].album, prose: raw };
+          else throw new Error("empty weave");
+        }
       } catch (err) {
         if (err && err.name === "AbortError") return;
         woven = {
@@ -220,6 +228,16 @@ export default function App() {
       weaveNext(0, state.run);
     }
   }, [state.ci, state.run, openChapter, weaveNext, stopAudio]);
+
+  // ---- Re-weave: re-run ONLY the weave step over the already-saved interviews. ----
+  // Same path the app uses after the last interview, but callable from the Done
+  // screen. Your transcripts are untouched; this overwrites the woven chapters.
+  const onReweave = useCallback(() => {
+    cancelInFlight();
+    stopAudio();
+    dispatch({ type: "TO_WEAVING" });
+    weaveNext(0, state.run);
+  }, [state.run, weaveNext, stopAudio]);
 
   // ---- Reset ----
   const onReset = useCallback(async () => {
@@ -328,7 +346,32 @@ export default function App() {
       )}
       {state.phase === "weaving" && <WeaveScreen state={state} />}
       {state.phase === "done" && (
-        <DoneScreen state={state} onExportTxt={onExportTxt} onExportSave={onExportSave} onReset={onReset} />
+        <>
+          <DoneScreen state={state} onExportTxt={onExportTxt} onExportSave={onExportSave} onReset={onReset} onReweave={onReweave} />
+          <div style={{ maxWidth: 700, margin: "0 auto", padding: "0 20px 44px", textAlign: "center" }}>
+            <button
+              onClick={onReweave}
+              disabled={state.loading}
+              style={{
+                fontFamily: SANS,
+                fontSize: 15,
+                fontWeight: 600,
+                color: "#1a1714",
+                background: "#d9b88f",
+                border: "none",
+                borderRadius: 10,
+                padding: "13px 24px",
+                cursor: state.loading ? "default" : "pointer",
+                opacity: state.loading ? 0.5 : 1,
+              }}
+            >
+              Re-weave the Film
+            </button>
+            <div style={{ fontFamily: SANS, fontSize: 12, color: STEEL, marginTop: 10, lineHeight: 1.5 }}>
+              Re-runs the weave over your saved interviews. Your answers don't change.
+            </div>
+          </div>
+        </>
       )}
       {showCrisisFooter && <CrisisFooter />}
     </>

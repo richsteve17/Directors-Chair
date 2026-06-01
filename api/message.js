@@ -9,7 +9,7 @@
 //   GEMINI_API_KEY   (required)
 //   GEMINI_MODEL     (optional, default gemini-2.5-flash)
 //   GEMINI_FALLBACK  (optional, comma list of fallback model ids)
-//   MAX_TOKENS       (optional, default 1200)
+//   MAX_TOKENS       (optional, default 2048)
 //   TEMPERATURE      (optional, default 1.0 — higher = more distinct/varied voices)
 // ============================================================================
 
@@ -18,7 +18,8 @@ const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-2.0-flash,gemini-1.5-f
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "1200", 10);
+// 2048 comfortably fits a full ~380-word chapter weave (the longest call) as JSON.
+const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "2048", 10);
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || "1.0");
 
 // Map our { role:"user"|"assistant", content } -> Gemini contents (role "model").
@@ -40,10 +41,19 @@ async function callGemini(model, system, messages, signal) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
   )}:generateContent`;
+  const generationConfig = { maxOutputTokens: MAX_TOKENS, temperature: TEMPERATURE };
+  // Gemini 2.5+ models do hidden "thinking" that is billed against maxOutputTokens.
+  // On long generations (a full chapter weave) that reasoning can consume the entire
+  // budget and return an EMPTY candidate (finishReason MAX_TOKENS) with no prose —
+  // which is why every chapter was falling back to the "could not be rendered"
+  // placeholder. Disable thinking on those models so the whole budget goes to output.
+  if (/gemini-(2\.5|3\.|3-)/.test(model)) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
   const body = {
     system_instruction: { parts: [{ text: system }] },
     contents: toGeminiContents(messages),
-    generationConfig: { maxOutputTokens: MAX_TOKENS, temperature: TEMPERATURE },
+    generationConfig,
   };
   const res = await fetch(url, {
     method: "POST",
@@ -109,8 +119,14 @@ export default async function handler(req, res) {
       const data = await upstream.json();
       const text = extractText(data);
       if (!text) {
-        // Could be a safety block or empty candidate.
+        // Safety block or empty candidate (e.g. thinking ate the whole budget).
         const reason = data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason || "empty";
+        // Give the next model a shot before giving up — a different model may not
+        // hit the same empty/thinking edge on this prompt.
+        if (i < models.length - 1) {
+          lastDetail = `empty_response:${String(reason).slice(0, 120)}`;
+          continue;
+        }
         return res.status(502).json({ error: "empty_response", detail: String(reason).slice(0, 200) });
       }
       return res.status(200).json({ text, model });

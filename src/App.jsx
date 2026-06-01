@@ -16,6 +16,25 @@ import WeaveScreen from "./components/WeaveScreen.jsx";
 import DoneScreen from "./components/DoneScreen.jsx";
 import CrisisFooter from "./components/CrisisFooter.jsx";
 
+// Parse a woven chapter from the model's reply. The weave is plain text
+// ("TITLE: ...\n\n<prose>") because long prose inside JSON breaks on the literal
+// newlines/quotes it contains. We still accept clean JSON if the model returns it.
+function parseWeave(raw, fallbackTitle) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  // If the model happened to return valid JSON with prose, honor it.
+  const j = safeParse(text, null);
+  if (j && j.prose) return { chapterTitle: j.chapterTitle || fallbackTitle, prose: String(j.prose).trim() };
+  // Plain text: an optional "TITLE: ..." first line, the rest is prose.
+  const m = text.match(/^\s*TITLE:\s*(.+?)(?:\n|$)/i);
+  if (m) {
+    const prose = text.slice(m.index + m[0].length).trim();
+    if (prose) return { chapterTitle: m[1].trim(), prose };
+  }
+  // No recognizable title line — treat the whole reply as the chapter prose.
+  return { chapterTitle: fallbackTitle, prose: text };
+}
+
 // Serialisable slice of state we persist.
 function persistable(s) {
   const { phase, selected, run, ci, stageClosed, weaveIdx, docMeta, ttsOn } = s;
@@ -175,16 +194,8 @@ export default function App() {
           [{ role: "user", content: `Interview transcript:\n\n${transcriptText}\n\nWrite the chapter.` }],
           { signal }
         );
-        woven = safeParse(out, null);
-        // Tolerate non-JSON: if the model returned real prose but not valid JSON,
-        // keep the raw text instead of discarding the whole chapter. Only the
-        // genuinely-empty case (the old Gemini thinking-budget failure) falls through
-        // to the placeholder below.
-        if (!woven || !woven.prose) {
-          const raw = (typeof out === "string" ? out : "").trim();
-          if (raw) woven = { chapterTitle: run[idx].album, prose: raw };
-          else throw new Error("empty weave");
-        }
+        woven = parseWeave(out, run[idx].album);
+        if (!woven || !woven.prose) throw new Error("empty weave");
       } catch (err) {
         if (err && err.name === "AbortError") return;
         woven = {

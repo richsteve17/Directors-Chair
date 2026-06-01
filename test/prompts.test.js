@@ -73,9 +73,10 @@ test("interviewSystem adds sensitive guardrails where flagged", () => {
   assert.match(sys, /never extract or describe method/);
 });
 
-test("weaveSystem uses custom weaveVoice for finale and prose schema", () => {
+test("weaveSystem uses custom weaveVoice for finale and plain-text format", () => {
   const sys = weaveSystem("The Architecture", "Howard Stern", "tail text");
   assert.match(sys, /You are Gemini — the machine itself/);
-  assert.match(sys, /"chapterTitle"/);
+  assert.match(sys, /TITLE:/);
+  assert.match(sys, /NO JSON/);
   assert.match(sys, /Howard Stern/);
 });

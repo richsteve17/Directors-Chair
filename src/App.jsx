@@ -200,21 +200,54 @@ export default function App() {
     []
   );
 
+  // ---- Finalize: name the film. Hard timeout so it can NEVER hang. ----
+  // Previously a request that never resolved (no response, no error) left the await
+  // waiting forever and the app stuck on "Cutting the film." This races the call
+  // against an 18s timer; whichever wins, we always advance to the Done screen.
   const finalizeDoc = useCallback(async (run) => {
     dispatch({ type: "FINALIZE_START" });
+
+    const FALLBACK = { title: "CMASS", logline: "A life told in many voices." };
     const signal = newAbort();
+    const timeout = (ms) => new Promise((resolve) => setTimeout(() => resolve({ __timedOut: true }), ms));
+
     try {
       const titles = run
         .map((c) => `${c.album} (dir. ${c.director}): ${c.woven ? c.woven.chapterTitle : ""}`)
         .join("\n");
-      const out = await callAPI(finalizeSystem(), [{ role: "user", content: titles }], { signal });
-      const parsed = safeParse(out, { title: "CMASS", logline: "A life told in many voices." });
+      const apiCall = callAPI(finalizeSystem(), [{ role: "user", content: titles }], { signal });
+      const result = await Promise.race([apiCall, timeout(18000)]);
+
+      if (result && result.__timedOut) {
+        cancelInFlight();
+        dispatch({ type: "FINALIZE_OK", docMeta: FALLBACK });
+        return;
+      }
+      const parsed = safeParse(result, FALLBACK);
       dispatch({ type: "FINALIZE_OK", docMeta: parsed });
     } catch (err) {
-      if (err && err.name === "AbortError") return;
-      dispatch({ type: "FINALIZE_OK", docMeta: { title: "CMASS", logline: "A life told in many voices." } });
+      // Even on abort or error, never strand the user on the weave screen.
+      dispatch({ type: "FINALIZE_OK", docMeta: FALLBACK });
     }
   }, []);
+
+  // ---- Recovery: rescue a run stranded in 'weaving' with all chapters already woven. ----
+  // If a previous session wove every chapter but finalize hung (the old bug), reloading
+  // lands back on the stuck weave screen. Detect that exact state once after hydrate and
+  // run the now-timeout-protected finalize to flip straight to the finished film.
+  const recoveredRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || recoveredRef.current) return;
+    if (
+      state.phase === "weaving" &&
+      state.run.length > 0 &&
+      state.run.every((c) => c.woven && c.woven.prose) &&
+      !state.loading
+    ) {
+      recoveredRef.current = true;
+      finalizeDoc(state.run);
+    }
+  }, [hydrated, state.phase, state.run, state.loading, finalizeDoc]);
 
   const onNextStage = useCallback(async () => {
     if (state.ci + 1 < state.run.length) {
@@ -235,6 +268,7 @@ export default function App() {
   const onReweave = useCallback(() => {
     cancelInFlight();
     stopAudio();
+    recoveredRef.current = true; // a manual re-weave counts as handled
     dispatch({ type: "TO_WEAVING" });
     weaveNext(0, state.run);
   }, [state.run, weaveNext, stopAudio]);

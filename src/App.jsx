@@ -231,23 +231,28 @@ export default function App() {
     }
   }, []);
 
-  // ---- Recovery: rescue a run stranded in 'weaving' with all chapters already woven. ----
-  // If a previous session wove every chapter but finalize hung (the old bug), reloading
-  // lands back on the stuck weave screen. Detect that exact state once after hydrate and
-  // run the now-timeout-protected finalize to flip straight to the finished film.
+  // ---- Recovery: rescue a run stranded in 'weaving'. ----
+  // If a previous session left the app on the weave screen (the old finalize hang,
+  // or a chapter that wove with empty prose so the stricter check never advanced),
+  // reloading lands back here with no buttons. Detect that once after hydrate and
+  // move it forward: resume weaving any unfinished chapters, else run the
+  // timeout-protected finalize so it flips straight to the finished film.
   const recoveredRef = useRef(false);
   useEffect(() => {
     if (!hydrated || recoveredRef.current) return;
-    if (
-      state.phase === "weaving" &&
-      state.run.length > 0 &&
-      state.run.every((c) => c.woven && c.woven.prose) &&
-      !state.loading
-    ) {
+    if (state.phase === "weaving" && state.run.length > 0 && !state.loading) {
       recoveredRef.current = true;
-      finalizeDoc(state.run);
+      const firstUnwoven = state.run.findIndex((c) => !c.woven);
+      if (firstUnwoven === -1) finalizeDoc(state.run);
+      else weaveNext(firstUnwoven, state.run);
     }
-  }, [hydrated, state.phase, state.run, state.loading, finalizeDoc]);
+  }, [hydrated, state.phase, state.run, state.loading, finalizeDoc, weaveNext]);
+
+  // Force-finish from the weave screen: name the film with whatever is woven so far.
+  const onForceFinish = useCallback(() => {
+    recoveredRef.current = true;
+    finalizeDoc(state.run);
+  }, [state.run, finalizeDoc]);
 
   const onNextStage = useCallback(async () => {
     if (state.ci + 1 < state.run.length) {
@@ -378,7 +383,7 @@ export default function App() {
           hasAnyTranscript={hasAnyTranscript}
         />
       )}
-      {state.phase === "weaving" && <WeaveScreen state={state} />}
+      {state.phase === "weaving" && <WeaveScreen state={state} onForceFinish={onForceFinish} onReweave={onReweave} />}
       {state.phase === "done" && (
         <>
           <DoneScreen state={state} onExportTxt={onExportTxt} onExportSave={onExportSave} onReset={onReset} onReweave={onReweave} />

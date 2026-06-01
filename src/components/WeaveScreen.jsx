@@ -1,8 +1,9 @@
 import React from "react";
 import { wrapStyle, innerStyle, SANS, ACCENT, STEEL, TEXT } from "../styles/tokens.js";
 
-export default function WeaveScreen({ state }) {
+export default function WeaveScreen({ state, onForceFinish, onReweave }) {
   const { run, weaveIdx, loading } = state;
+  const allWoven = run.length > 0 && run.every((c) => c.woven);
   return (
     <div style={wrapStyle}>
       <div style={innerStyle}>
@@ -33,6 +34,38 @@ export default function WeaveScreen({ state }) {
         {loading && weaveIdx >= run.length && (
           <div style={{ fontSize: 14, color: STEEL, fontStyle: "italic", fontFamily: SANS, marginTop: 10 }}>
             Titling the film…
+          </div>
+        )}
+
+        {/* Escape hatch: if the weave ever parks here, never trap the user without controls. */}
+        {allWoven && (
+          <div style={{ marginTop: 26, paddingTop: 20, borderTop: `1px solid ${STEEL}33` }}>
+            <button
+              onClick={onForceFinish}
+              disabled={loading}
+              style={{
+                fontFamily: SANS, fontSize: 15, fontWeight: 600, color: "#1a1714",
+                background: "#d9b88f", border: "none", borderRadius: 10, padding: "13px 24px",
+                cursor: loading ? "default" : "pointer", opacity: loading ? 0.5 : 1,
+              }}
+            >
+              Finish the film →
+            </button>
+            <button
+              onClick={onReweave}
+              disabled={loading}
+              style={{
+                fontFamily: SANS, fontSize: 14, fontWeight: 600, color: STEEL,
+                background: "transparent", border: `1px solid ${STEEL}`, borderRadius: 10,
+                padding: "12px 20px", marginLeft: 10,
+                cursor: loading ? "default" : "pointer", opacity: loading ? 0.5 : 1,
+              }}
+            >
+              Re-weave
+            </button>
+            <div style={{ fontSize: 12, color: STEEL, fontFamily: SANS, marginTop: 10, lineHeight: 1.5 }}>
+              All chapters are woven. Tap to name the film and view it — or re-weave from your saved interviews.
+            </div>
           </div>
         )}
       </div>

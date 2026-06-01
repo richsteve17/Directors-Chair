@@ -31,7 +31,7 @@ export default function DoneScreen({ state, onExportTxt, onExportSave, onReset }
                   Directed by {c.director}
                   {c.reflection ? ` · closing by ${c.reflection}` : ""}
                 </div>
-                {c.woven.prose.split(/\n\n+/).map((p, j) => (
+                {(c.woven.prose || "").split(/\n\n+/).map((p, j) => (
                   <p key={j} style={{ fontSize: 17, lineHeight: 1.7, margin: "0 0 16px", color: "#e7e2d8" }}>
                     {p}
                   </p>

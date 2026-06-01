@@ -9,17 +9,17 @@
 //   GEMINI_API_KEY   (required)
 //   GEMINI_MODEL     (optional, default gemini-2.5-flash)
 //   GEMINI_FALLBACK  (optional, comma list of fallback model ids)
-//   MAX_TOKENS       (optional, default 4096)
+//   MAX_TOKENS       (optional, default 8192)
 //   TEMPERATURE      (optional, default 1.0 — higher = more distinct/varied voices)
 // ============================================================================
 
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-2.0-flash,gemini-1.5-flash")
+const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-flash-latest,gemini-2.0-flash")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-// 4096 fits a full ~700-1000 word chapter weave (the longest call) as JSON with headroom.
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "4096", 10);
+// 8192 leaves room for 2.5-flash's hidden "thinking" PLUS a full ~1000-word chapter.
+const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "8192", 10);
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || "1.0");
 
 // Map our { role:"user"|"assistant", content } -> Gemini contents (role "model").
@@ -41,19 +41,16 @@ async function callGemini(model, system, messages, signal) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
   )}:generateContent`;
-  const generationConfig = { maxOutputTokens: MAX_TOKENS, temperature: TEMPERATURE };
-  // Gemini 2.5+ models do hidden "thinking" that is billed against maxOutputTokens.
-  // On long generations (a full chapter weave) that reasoning can consume the entire
-  // budget and return an EMPTY candidate (finishReason MAX_TOKENS) with no prose —
-  // which is why every chapter was falling back to the "could not be rendered"
-  // placeholder. Disable thinking on those models so the whole budget goes to output.
-  if (/gemini-(2\.5|3\.|3-)/.test(model)) {
-    generationConfig.thinkingConfig = { thinkingBudget: 0 };
-  }
+  // gemini-2.5-flash does hidden "thinking" billed against maxOutputTokens. The
+  // original empty-weave bug was the thinking eating a small (1200) budget, leaving
+  // no room for prose (finishReason MAX_TOKENS, empty candidate). Rather than send a
+  // thinkingConfig field (rejected as an unknown argument by this API version, which
+  // 400s the only model this key can reach), just give a large budget so thinking AND
+  // a full ~1000-word chapter both fit.
   const body = {
     system_instruction: { parts: [{ text: system }] },
     contents: toGeminiContents(messages),
-    generationConfig,
+    generationConfig: { maxOutputTokens: MAX_TOKENS, temperature: TEMPERATURE },
   };
   const res = await fetch(url, {
     method: "POST",

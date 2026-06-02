@@ -182,25 +182,39 @@ export default function App() {
       dispatch({ type: "WEAVE_PROGRESS", idx });
       const prev = idx > 0 ? run[idx - 1] : null;
       const prevTail = prev && prev.woven ? prev.woven.prose.slice(-160) : "";
+      // Cap each turn so a giant pasted-lyrics block can't bloat the request past the
+      // 30s function timeout — the dialogue is what the weave needs, not 2000 lines of lyrics.
       const transcriptText = run[idx].transcript
-        .map((t) => `${t.who === "you" ? "STEVE" : run[idx].director.toUpperCase()}: ${t.text}`)
+        .map((t) => {
+          const who = t.who === "you" ? "STEVE" : run[idx].director.toUpperCase();
+          const txt = t.text.length > 1500 ? t.text.slice(0, 1500) + " […]" : t.text;
+          return `${who}: ${txt}`;
+        })
         .join("\n\n");
 
-      let woven;
+      let woven = null;
       const signal = newAbort();
+      // Bound each chapter: if a call runs long (big transcript near the function
+      // timeout), take what we have and move on instead of retry-storming on one chapter.
+      const timeout = (ms) => new Promise((r) => setTimeout(() => r({ __timedOut: true }), ms));
       try {
-        const out = await callAPI(
+        const apiCall = callAPI(
           weaveSystem(run[idx].album, prev ? prev.director : null, prevTail),
           [{ role: "user", content: `Interview transcript:\n\n${transcriptText}\n\nWrite the chapter.` }],
           { signal }
         );
-        woven = parseWeave(out, run[idx].album);
-        if (!woven || !woven.prose) throw new Error("empty weave");
+        apiCall.catch(() => {}); // swallow a late rejection if the timeout already won
+        const out = await Promise.race([apiCall, timeout(28000)]);
+        if (out && out.__timedOut) cancelInFlight();
+        else woven = parseWeave(out, run[idx].album);
       } catch (err) {
         if (err && err.name === "AbortError") return;
+        // fall through to the placeholder below
+      }
+      if (!woven || !woven.prose) {
         woven = {
           chapterTitle: run[idx].album,
-          prose: `This chapter — ${run[idx].album}, in the voice of ${run[idx].director} — could not be rendered this pass. Steve's interview for it is preserved in the transcript; reweave it any time.`,
+          prose: `This chapter — ${run[idx].album}, in the voice of ${run[idx].director} — didn't render this pass. Steve's interview is saved; tap Re-weave to try it again.`,
         };
       }
       dispatch({ type: "WEAVE_OK", idx, woven });

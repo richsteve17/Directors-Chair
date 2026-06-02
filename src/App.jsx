@@ -194,8 +194,9 @@ export default function App() {
 
       let woven = null;
       const signal = newAbort();
-      // Bound each chapter: if a call runs long (big transcript near the function
-      // timeout), take what we have and move on instead of retry-storming on one chapter.
+      // Bound each chapter so the loop can't hang forever, but give a full chapter
+      // real room to generate (~20-30s) — too tight a cap was placeholdering the
+      // longer-transcript chapters. Sits just under the 60s function maxDuration.
       const timeout = (ms) => new Promise((r) => setTimeout(() => r({ __timedOut: true }), ms));
       try {
         const apiCall = callAPI(
@@ -204,7 +205,7 @@ export default function App() {
           { signal }
         );
         apiCall.catch(() => {}); // swallow a late rejection if the timeout already won
-        const out = await Promise.race([apiCall, timeout(28000)]);
+        const out = await Promise.race([apiCall, timeout(55000)]);
         if (out && out.__timedOut) cancelInFlight();
         else woven = parseWeave(out, run[idx].album);
       } catch (err) {

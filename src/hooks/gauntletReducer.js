@@ -115,7 +115,16 @@ export function reducer(state, action) {
       return { ...state, phase: "setup" };
 
     case "TO_WEAVING":
-      return { ...state, phase: "weaving", weaveIdx: 0, loading: true };
+      // Clear any prior woven chapters so the driver regenerates the whole film, and
+      // start idle (loading false) so the weave-driver effect immediately picks it up.
+      return {
+        ...state,
+        phase: "weaving",
+        weaveIdx: 0,
+        loading: false,
+        docMeta: null,
+        run: state.run.map((c) => ({ ...c, woven: null })),
+      };
 
     case "WEAVE_PROGRESS":
       return { ...state, weaveIdx: action.idx, loading: true };

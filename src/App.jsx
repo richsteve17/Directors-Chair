@@ -173,58 +173,51 @@ export default function App() {
   }, [openChapter, state.ci, state.run]);
 
   // ---- Weaving ----
-  const weaveNext = useCallback(
-    async (idx, run) => {
-      if (idx >= run.length) {
-        await finalizeDoc(run);
-        return;
-      }
-      dispatch({ type: "WEAVE_PROGRESS", idx });
-      const prev = idx > 0 ? run[idx - 1] : null;
-      const prevTail = prev && prev.woven ? prev.woven.prose.slice(-160) : "";
-      // Cap each turn so a giant pasted-lyrics block can't bloat the request past the
-      // 30s function timeout — the dialogue is what the weave needs, not 2000 lines of lyrics.
-      const transcriptText = run[idx].transcript
-        .map((t) => {
-          const who = t.who === "you" ? "STEVE" : run[idx].director.toUpperCase();
-          const txt = t.text.length > 1500 ? t.text.slice(0, 1500) + " […]" : t.text;
-          return `${who}: ${txt}`;
-        })
-        .join("\n\n");
+  // Weave ONE chapter and record the result. Sequencing/finalize is handled by the
+  // declarative weave driver effect below — no setTimeout chain (mobile Safari throttles
+  // and kills long timer chains, which is why the run kept stalling and needing refreshes).
+  const weaveOne = useCallback(async (idx, run) => {
+    dispatch({ type: "WEAVE_PROGRESS", idx });
+    const prev = idx > 0 ? run[idx - 1] : null;
+    const prevTail = prev && prev.woven && !prev.woven.failed ? prev.woven.prose.slice(-160) : "";
+    // Cap each turn so a giant pasted-lyrics block can't bloat the request past the
+    // function timeout — the dialogue is what the weave needs, not 2000 lines of lyrics.
+    const transcriptText = run[idx].transcript
+      .map((t) => {
+        const who = t.who === "you" ? "STEVE" : run[idx].director.toUpperCase();
+        const txt = t.text.length > 1500 ? t.text.slice(0, 1500) + " […]" : t.text;
+        return `${who}: ${txt}`;
+      })
+      .join("\n\n");
 
-      let woven = null;
-      const signal = newAbort();
-      // Bound each chapter so the loop can't hang forever, but give a full chapter
-      // real room to generate (~20-30s) — too tight a cap was placeholdering the
-      // longer-transcript chapters. Sits just under the 60s function maxDuration.
-      const timeout = (ms) => new Promise((r) => setTimeout(() => r({ __timedOut: true }), ms));
-      try {
-        const apiCall = callAPI(
-          weaveSystem(run[idx].album, prev ? prev.director : null, prevTail),
-          [{ role: "user", content: `Interview transcript:\n\n${transcriptText}\n\nWrite the chapter.` }],
-          { signal }
-        );
-        apiCall.catch(() => {}); // swallow a late rejection if the timeout already won
-        const out = await Promise.race([apiCall, timeout(55000)]);
-        if (out && out.__timedOut) cancelInFlight();
-        else woven = parseWeave(out, run[idx].album);
-      } catch (err) {
-        if (err && err.name === "AbortError") return;
-        // fall through to the placeholder below
-      }
-      if (!woven || !woven.prose) {
-        woven = {
-          chapterTitle: run[idx].album,
-          prose: `This chapter — ${run[idx].album}, in the voice of ${run[idx].director} — didn't render this pass. Steve's interview is saved; tap Re-weave to try it again.`,
-        };
-      }
-      dispatch({ type: "WEAVE_OK", idx, woven });
-      const updated = run.map((c, i) => (i === idx ? { ...c, woven } : c));
-      setTimeout(() => weaveNext(idx + 1, updated), 300);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+    let woven = null;
+    const signal = newAbort();
+    // Bound each chapter so it can't hang, but give a full chapter real room (~20-30s)
+    // to generate. Sits just under the 60s function maxDuration.
+    const timeout = (ms) => new Promise((r) => setTimeout(() => r({ __timedOut: true }), ms));
+    try {
+      const apiCall = callAPI(
+        weaveSystem(run[idx].album, prev ? prev.director : null, prevTail),
+        [{ role: "user", content: `Interview transcript:\n\n${transcriptText}\n\nWrite the chapter.` }],
+        { signal }
+      );
+      apiCall.catch(() => {}); // swallow a late rejection if the timeout already won
+      const out = await Promise.race([apiCall, timeout(55000)]);
+      if (out && out.__timedOut) cancelInFlight();
+      else woven = parseWeave(out, run[idx].album);
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // navigated away — don't record
+      // otherwise fall through to the placeholder below
+    }
+    if (!woven || !woven.prose) {
+      woven = {
+        chapterTitle: run[idx].album,
+        failed: true,
+        prose: `This chapter — ${run[idx].album}, in the voice of ${run[idx].director} — didn't render this pass. Steve's interview is saved; tap Re-weave to try it again.`,
+      };
+    }
+    dispatch({ type: "WEAVE_OK", idx, woven });
+  }, []);
 
   // ---- Finalize: name the film. Hard timeout so it can NEVER hang. ----
   // Previously a request that never resolved (no response, no error) left the await
@@ -257,26 +250,42 @@ export default function App() {
     }
   }, []);
 
-  // ---- Recovery: rescue a run stranded in 'weaving'. ----
-  // If a previous session left the app on the weave screen (the old finalize hang,
-  // or a chapter that wove with empty prose so the stricter check never advanced),
-  // reloading lands back here with no buttons. Detect that once after hydrate and
-  // move it forward: resume weaving any unfinished chapters, else run the
-  // timeout-protected finalize so it flips straight to the finished film.
-  const recoveredRef = useRef(false);
+  // ---- Weave driver ----
+  // Declarative engine that drives the whole weave. Whenever we're in the weaving phase
+  // and idle, it weaves the next chapter that still needs one; when every chapter is done
+  // it finalizes. Because it's a React effect keyed on state, it AUTO-RESUMES after any
+  // interruption (a reload, a backgrounded tab that killed an in-flight call) with no
+  // manual refresh, and it never cuts to the film until all chapters are truly done.
+  const weavingRef = useRef(false); // a weave call is in flight this tick
+  const attemptedRef = useRef(new Set()); // chapters tried THIS session (so a failing one doesn't loop)
   useEffect(() => {
-    if (!hydrated || recoveredRef.current) return;
-    if (state.phase === "weaving" && state.run.length > 0 && !state.loading) {
-      recoveredRef.current = true;
-      const firstUnwoven = state.run.findIndex((c) => !c.woven);
-      if (firstUnwoven === -1) finalizeDoc(state.run);
-      else weaveNext(firstUnwoven, state.run);
+    if (!hydrated || state.phase !== "weaving") {
+      weavingRef.current = false;
+      return;
     }
-  }, [hydrated, state.phase, state.run, state.loading, finalizeDoc, weaveNext]);
+    if (state.loading || weavingRef.current || state.run.length === 0) return;
+    // First chapter with no real prose yet that we haven't already tried this session.
+    const next = state.run.findIndex(
+      (c, i) => (!c.woven || c.woven.failed) && !attemptedRef.current.has(i)
+    );
+    weavingRef.current = true;
+    (async () => {
+      try {
+        if (next === -1) await finalizeDoc(state.run);
+        else {
+          attemptedRef.current.add(next);
+          await weaveOne(next, state.run);
+        }
+      } finally {
+        weavingRef.current = false;
+      }
+    })();
+  }, [hydrated, state.phase, state.loading, state.run, finalizeDoc, weaveOne]);
 
   // Force-finish from the weave screen: name the film with whatever is woven so far.
   const onForceFinish = useCallback(() => {
-    recoveredRef.current = true;
+    cancelInFlight();
+    attemptedRef.current = new Set();
     finalizeDoc(state.run);
   }, [state.run, finalizeDoc]);
 
@@ -288,21 +297,20 @@ export default function App() {
     } else {
       cancelInFlight();
       stopAudio();
-      dispatch({ type: "TO_WEAVING" });
-      weaveNext(0, state.run);
+      attemptedRef.current = new Set(); // fresh weave session
+      dispatch({ type: "TO_WEAVING" }); // the weave driver effect takes it from here
     }
-  }, [state.ci, state.run, openChapter, weaveNext, stopAudio]);
+  }, [state.ci, state.run, openChapter, stopAudio]);
 
   // ---- Re-weave: re-run ONLY the weave step over the already-saved interviews. ----
-  // Same path the app uses after the last interview, but callable from the Done
-  // screen. Your transcripts are untouched; this overwrites the woven chapters.
+  // Callable from the Done or weave screen. Your transcripts are untouched; TO_WEAVING
+  // clears the woven chapters so the driver regenerates all of them from scratch.
   const onReweave = useCallback(() => {
     cancelInFlight();
     stopAudio();
-    recoveredRef.current = true; // a manual re-weave counts as handled
+    attemptedRef.current = new Set(); // fresh weave session — retry everything
     dispatch({ type: "TO_WEAVING" });
-    weaveNext(0, state.run);
-  }, [state.run, weaveNext, stopAudio]);
+  }, [stopAudio]);
 
   // ---- Reset ----
   const onReset = useCallback(async () => {

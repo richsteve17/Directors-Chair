@@ -18,8 +18,11 @@ const FALLBACKS = (process.env.GEMINI_FALLBACK || "gemini-flash-latest,gemini-2.
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-// 8192 leaves room for 2.5-flash's hidden "thinking" PLUS a full ~1000-word chapter.
-const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "8192", 10);
+// The weave needs room for the model's hidden "thinking" PLUS a full ~1000-word
+// chapter. Enforce an 8192 FLOOR: a stale/low MAX_TOKENS env var was capping output
+// to ~40 words (chapters cut off mid-sentence). The env var can raise this, never
+// lower it below what a chapter requires.
+const MAX_TOKENS = Math.max(parseInt(process.env.MAX_TOKENS || "8192", 10) || 0, 8192);
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || "1.0");
 
 // Map our { role:"user"|"assistant", content } -> Gemini contents (role "model").
